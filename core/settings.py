@@ -126,6 +126,7 @@ AUTH_USER_MODEL = 'profiles.Writer'
 
 AUTHENTICATION_BACKENDS = [
     'profiles.backends.EmailBackend',
+    'django.contrib.auth.backends.ModelBackend',
 ]
 
 AUTH_PASSWORD_VALIDATORS = [

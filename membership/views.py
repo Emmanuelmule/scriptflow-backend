@@ -1,106 +1,103 @@
-from rest_framework          import generics, status, permissions
+from rest_framework import generics, status, permissions
 from rest_framework.response import Response
-from rest_framework.views    import APIView
-from django.utils            import timezone
-from datetime                import timedelta
-from .models      import Membership, TIER_PRICES
-from .serializers import MembershipSerializer, STKPushSerializer
-from .mpesa       import stk_push
+from rest_framework.views import APIView
+from .models import CreditPackage, CreditTransaction, WriterCredits
 
 
-class InitiateMembershipPaymentView(APIView):
+class CreditPackageListView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        packages = CreditPackage.objects.filter(is_active=True)
+        data = [{
+            'id':        p.id,
+            'name':      p.name,
+            'credits':   p.credits,
+            'price_kes': str(p.price_kes),
+        } for p in packages]
+        return Response(data)
+
+
+class CreditBalanceView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        balance, _ = WriterCredits.objects.get_or_create(writer=request.user)
+        return Response({'balance': balance.balance})
+
+
+class CreditTransactionListView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        txns = CreditTransaction.objects.filter(
+            writer=request.user
+        ).order_by('-created_at')[:20]
+        data = [{
+            'id':          t.id,
+            'type':        t.type,
+            'credits':     t.credits,
+            'description': t.description,
+            'created_at':  t.created_at,
+        } for t in txns]
+        return Response(data)
+
+
+class InitiateCreditPurchaseView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        serializer = STKPushSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
-        tier   = serializer.validated_data['tier']
-        phone  = serializer.validated_data['phone']
-        amount = TIER_PRICES[tier]
-
-        # Create pending membership record
-        membership = Membership.objects.create(
-            writer     = request.user,
-            tier       = tier,
-            amount_kes = amount,
-            phone      = phone,
-            status     = 'pending',
-        )
-
-        # Format phone: 07XX → 2547XX
-        formatted_phone = '254' + phone[1:] if phone.startswith('0') else phone
-
-        # Trigger STK push
-        result = stk_push(
-            phone       = formatted_phone,
-            amount      = amount,
-            account_ref = f"WR-{request.user.id:05d}",
-            description = f"ScriptFlow {tier.capitalize()} Membership"
-        )
-
-        if result.get('ResponseCode') == '0':
-            membership.checkout_id = result.get('CheckoutRequestID', '')
-            membership.save()
-            return Response({
-                'message':     'STK Push sent. Enter your M-Pesa PIN on your phone.',
-                'checkout_id': membership.checkout_id,
-                'membership_id': membership.id,
-            })
-
-        membership.delete()
-        return Response({'error': 'Failed to initiate payment. Try again.'}, 
-                        status=status.HTTP_400_BAD_REQUEST)
-
-
-class MpesaCallbackView(APIView):
-    permission_classes = [permissions.AllowAny]
-
-    def post(self, request):
-        data     = request.data.get('Body', {}).get('stkCallback', {})
-        result   = data.get('ResultCode')
-        checkout = data.get('CheckoutRequestID')
+        package_id = request.data.get('package_id')
+        phone      = request.data.get('phone')
 
         try:
-            membership = Membership.objects.get(checkout_id=checkout)
-        except Membership.DoesNotExist:
-            return Response({'status': 'ok'})
+            package = CreditPackage.objects.get(id=package_id, is_active=True)
+        except CreditPackage.DoesNotExist:
+            return Response({'error': 'Invalid package.'}, status=400)
 
-        if result == 0:
-            # Payment successful
-            items = {
-                i['Name']: i['Value']
-                for i in data.get('CallbackMetadata', {}).get('Item', [])
-            }
-            membership.mpesa_code = items.get('MpesaReceiptNumber', '')
-            membership.paid_at    = timezone.now()
-            membership.expires_at = timezone.now() + timedelta(days=30)
-            membership.status     = 'active'
-            membership.save()
+        # TODO: Trigger M-Pesa STK Push here
+        # For now simulate success
+        balance, _ = WriterCredits.objects.get_or_create(writer=request.user)
+        balance.add_credits(package.credits)
 
-            # Notify writer
-            from notification.models import Notification
-            Notification.objects.create(
-                writer  = membership.writer,
-                type    = 'membership',
-                message = f"Membership activated! Valid until {membership.expires_at.strftime('%d %b %Y')}."
-            )
-        else:
-            membership.status = 'pending'
-            membership.save()
+        CreditTransaction.objects.create(
+            writer      = request.user,
+            type        = 'purchase',
+            credits     = package.credits,
+            description = f'Purchased {package.name} package',
+        )
 
-        return Response({'status': 'ok'})
+        return Response({
+            'message':     f'Successfully purchased {package.credits} credits.',
+            'new_balance': balance.balance,
+        })
 
 
-class MembershipStatusView(generics.ListAPIView):
-    serializer_class   = MembershipSerializer
-    permission_classes = [permissions.IsAuthenticated]
-
-    def get_queryset(self):
-        return Membership.objects.filter(writer=self.request.user)
-
-
-class AdminMembershipListView(generics.ListAPIView):
-    serializer_class   = MembershipSerializer
+class AdminCreditPackageView(generics.ListCreateAPIView):
     permission_classes = [permissions.IsAdminUser]
-    queryset           = Membership.objects.all().order_by('-created_at')
+    queryset = CreditPackage.objects.all()
+
+    def get(self, request):
+        packages = CreditPackage.objects.all()
+        data = [{
+            'id':        p.id,
+            'name':      p.name,
+            'credits':   p.credits,
+            'price_kes': str(p.price_kes),
+            'is_active': p.is_active,
+        } for p in packages]
+        return Response(data)
+
+    def post(self, request):
+        name      = request.data.get('name')
+        credits   = request.data.get('credits')
+        price_kes = request.data.get('price_kes')
+        package   = CreditPackage.objects.create(
+            name=name, credits=credits, price_kes=price_kes
+        )
+        return Response({
+            'id':        package.id,
+            'name':      package.name,
+            'credits':   package.credits,
+            'price_kes': str(package.price_kes),
+        }, status=201)
