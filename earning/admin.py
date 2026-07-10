@@ -1,20 +1,12 @@
 from django.contrib import admin
-from .models import EscrowAccount, WriterEarning, Withdrawal
+from .models import Earning, Payout
 
-
-@admin.register(EscrowAccount)
-class EscrowAdmin(admin.ModelAdmin):
-    list_display = ['job', 'client_payment_kes', 'commission_kes', 'writer_amount_kes', 'status']
+@admin.register(Earning)
+class EarningAdmin(admin.ModelAdmin):
+    list_display = ['writer', 'job', 'gross_kes', 'commission_kes', 'net_kes', 'status', 'created_at']
     list_filter  = ['status']
 
-
-@admin.register(WriterEarning)
-class WriterEarningAdmin(admin.ModelAdmin):
-    list_display = ['writer', 'job', 'gross_amount_kes', 'commission_kes', 'net_amount_kes', 'status']
-    list_filter  = ['status']
-
-
-@admin.register(Withdrawal)
-class WithdrawalAdmin(admin.ModelAdmin):
+@admin.register(Payout)
+class PayoutAdmin(admin.ModelAdmin):
     list_display = ['writer', 'amount_kes', 'mpesa_number', 'status', 'created_at']
     list_filter  = ['status']

@@ -1,9 +1,10 @@
-from rest_framework          import generics, status, permissions
+from rest_framework import generics, status, permissions
 from rest_framework.response import Response
-from rest_framework.views    import APIView
-from django.db.models        import Sum
-from django.utils            import timezone
-from .models import WriterEarning, EscrowAccount, Withdrawal
+from rest_framework.views import APIView
+from django.db.models import Sum
+from django.utils import timezone
+from .models import Earning, Payout
+from notification.models import Notification
 
 MINIMUM_WITHDRAWAL_KES = 2500
 
@@ -13,42 +14,40 @@ class EarningsSummaryView(APIView):
 
     def get(self, request):
         writer   = request.user
-        earnings = writer.writer_earnings.all()
+        earnings = writer.earnings.all()
 
-        total     = earnings.aggregate(t=Sum('net_amount_kes'))['t'] or 0
-        available = earnings.filter(status='available').aggregate(t=Sum('net_amount_kes'))['t'] or 0
-        pending   = earnings.filter(status='pending').aggregate(t=Sum('net_amount_kes'))['t'] or 0
-        withdrawn = earnings.filter(status='withdrawn').aggregate(t=Sum('net_amount_kes'))['t'] or 0
+        total     = earnings.aggregate(t=Sum('net_kes'))['t'] or 0
+        available = earnings.filter(status='available').aggregate(t=Sum('net_kes'))['t'] or 0
+        pending   = earnings.filter(status='pending').aggregate(t=Sum('net_kes'))['t'] or 0
+        paid      = earnings.filter(status='paid').aggregate(t=Sum('net_kes'))['t'] or 0
 
         return Response({
-            'total_earned_kes':      float(total),
-            'available_kes':         float(available),
-            'pending_kes':           float(pending),
-            'withdrawn_kes':         float(withdrawn),
-            'minimum_withdrawal':    MINIMUM_WITHDRAWAL_KES,
-            'can_withdraw':          float(available) >= MINIMUM_WITHDRAWAL_KES,
-            'threshold_progress':    min(float(available) / MINIMUM_WITHDRAWAL_KES * 100, 100),
+            'total_earned':       float(total),
+            'available':          float(available),
+            'pending':            float(pending),
+            'paid_out':           float(paid),
+            'minimum_withdrawal': MINIMUM_WITHDRAWAL_KES,
+            'can_withdraw':       float(available) >= MINIMUM_WITHDRAWAL_KES,
+            'threshold_progress': min(float(available) / MINIMUM_WITHDRAWAL_KES * 100, 100),
+            'currency':           'KES',
         })
 
 
 class EarningsListView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
-    def get_queryset(self):
-        return WriterEarning.objects.filter(writer=self.request.user)
-
-    def list(self, request, *args, **kwargs):
-        qs = self.get_queryset()
+    def get(self, request):
+        earnings = request.user.earnings.all()
         data = [{
-            'id':               e.id,
-            'job_title':        e.job.title,
-            'gross_amount_kes': float(e.gross_amount_kes),
-            'commission_kes':   float(e.commission_kes),
-            'net_amount_kes':   float(e.net_amount_kes),
-            'status':           e.status,
-            'created_at':       e.created_at,
-        } for e in qs]
-        return Response({'count': len(data), 'results': data})
+            'id':             e.id,
+            'job_title':      e.job.title,
+            'gross_kes':      str(e.gross_kes),
+            'commission_kes': str(e.commission_kes),
+            'net_kes':        str(e.net_kes),
+            'status':         e.status,
+            'created_at':     e.created_at,
+        } for e in earnings]
+        return Response(data)
 
 
 class WithdrawView(APIView):
@@ -56,9 +55,9 @@ class WithdrawView(APIView):
 
     def post(self, request):
         writer    = request.user
-        available = writer.writer_earnings.filter(
-            status='available'
-        ).aggregate(t=Sum('net_amount_kes'))['t'] or 0
+        available = writer.earnings.filter(status='available').aggregate(
+            t=Sum('net_kes')
+        )['t'] or 0
 
         if float(available) < MINIMUM_WITHDRAWAL_KES:
             return Response({
@@ -66,129 +65,82 @@ class WithdrawView(APIView):
                          f'You have KES {available:.2f} available.'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        mpesa_number = request.data.get('mpesa_number')
+        mpesa_number = request.data.get('mpesa_number', '')
         if not mpesa_number:
             return Response({'error': 'M-Pesa number is required.'}, status=400)
 
-        withdrawal = Withdrawal.objects.create(
+        payout = Payout.objects.create(
             writer       = writer,
             amount_kes   = available,
             mpesa_number = mpesa_number,
             status       = 'pending',
         )
 
-        writer.writer_earnings.filter(status='available').update(status='withdrawn')
+        writer.earnings.filter(status='available').update(status='paid')
 
-        from notification.models import Notification
         Notification.objects.create(
             writer  = writer,
             type    = 'payout',
-            message = f'Withdrawal request of KES {available:.2f} received. Processing within 24 hours.'
+            message = f'Withdrawal request of KES {available:.2f} received. '
+                      f'Processing within 1-3 business days.'
         )
 
         return Response({
             'message':    f'Withdrawal of KES {available:.2f} submitted successfully.',
-            'withdrawal_id': withdrawal.id,
+            'payout_id':  payout.id,
             'amount_kes': float(available),
         })
 
 
-class WithdrawalHistoryView(generics.ListAPIView):
+class PayoutHistoryView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
-    def get_queryset(self):
-        return Withdrawal.objects.filter(writer=self.request.user)
-
-    def list(self, request, *args, **kwargs):
-        qs = self.get_queryset()
+    def get(self, request):
+        payouts = request.user.payouts.all()
         data = [{
-            'id':           w.id,
-            'amount_kes':   float(w.amount_kes),
-            'mpesa_number': w.mpesa_number,
-            'mpesa_code':   w.mpesa_code,
-            'status':       w.status,
-            'created_at':   w.created_at,
-        } for w in qs]
-        return Response({'count': len(data), 'results': data})
+            'id':           p.id,
+            'amount_kes':   str(p.amount_kes),
+            'mpesa_number': p.mpesa_number,
+            'mpesa_code':   p.mpesa_code,
+            'status':       p.status,
+            'created_at':   p.created_at,
+        } for p in payouts]
+        return Response(data)
 
 
-class AdminEscrowListView(generics.ListAPIView):
+class AdminPayoutListView(APIView):
     permission_classes = [permissions.IsAdminUser]
 
-    def list(self, request, *args, **kwargs):
-        escrows = EscrowAccount.objects.all().order_by('-created_at')
+    def get(self, request):
+        payouts = Payout.objects.filter(status='pending')
         data = [{
-            'id':                  e.id,
-            'job_title':           e.job.title,
-            'client_payment_kes':  float(e.client_payment_kes),
-            'commission_kes':      float(e.commission_kes),
-            'writer_amount_kes':   float(e.writer_amount_kes),
-            'status':              e.status,
-            'auto_release_date':   e.auto_release_date,
-            'created_at':          e.created_at,
-        } for e in escrows]
-        return Response({'count': len(data), 'results': data})
+            'id':           p.id,
+            'writer':       p.writer.full_name,
+            'amount_kes':   str(p.amount_kes),
+            'mpesa_number': p.mpesa_number,
+            'status':       p.status,
+            'created_at':   p.created_at,
+        } for p in payouts]
+        return Response(data)
 
 
-class AdminReleaseEscrowView(APIView):
+class AdminMarkPayoutProcessedView(APIView):
     permission_classes = [permissions.IsAdminUser]
 
     def post(self, request, pk):
         try:
-            escrow = EscrowAccount.objects.get(pk=pk)
-        except EscrowAccount.DoesNotExist:
-            return Response({'error': 'Escrow not found.'}, status=404)
+            payout = Payout.objects.get(pk=pk)
+        except Payout.DoesNotExist:
+            return Response({'error': 'Payout not found.'}, status=404)
 
-        escrow.status      = 'released'
-        escrow.released_at = timezone.now()
-        escrow.save()
+        payout.status       = 'processed'
+        payout.processed_at = timezone.now()
+        payout.mpesa_code   = request.data.get('mpesa_code', '')
+        payout.save()
 
-        WriterEarning.objects.filter(job=escrow.job).update(status='available')
-
-        from notification.models import Notification
         Notification.objects.create(
-            writer  = escrow.job.assigned_to,
+            writer  = payout.writer,
             type    = 'payout',
-            message = f'Payment of KES {escrow.writer_amount_kes} for "{escrow.job.title}" has been released.'
+            message = f'Your payout of KES {payout.amount_kes} has been processed via M-Pesa.'
         )
-
-        return Response({'message': 'Escrow released successfully.'})
-
-
-class AdminWithdrawalListView(generics.ListAPIView):
-    permission_classes = [permissions.IsAdminUser]
-
-    def list(self, request, *args, **kwargs):
-        withdrawals = Withdrawal.objects.filter(status='pending').order_by('-created_at')
-        data = [{
-            'id':           w.id,
-            'writer_name':  w.writer.full_name,
-            'amount_kes':   float(w.amount_kes),
-            'mpesa_number': w.mpesa_number,
-            'status':       w.status,
-            'created_at':   w.created_at,
-        } for w in withdrawals]
-        return Response({'count': len(data), 'results': data})
-
-
-class AdminMarkWithdrawalProcessedView(APIView):
-    permission_classes = [permissions.IsAdminUser]
-
-    def post(self, request, pk):
-        try:
-            withdrawal = Withdrawal.objects.get(pk=pk)
-        except Withdrawal.DoesNotExist:
-            return Response({'error': 'Withdrawal not found.'}, status=404)
-
-        withdrawal.status       = 'processed'
-        withdrawal.mpesa_code   = request.data.get('mpesa_code', '')
-        withdrawal.processed_at = timezone.now()
-        withdrawal.save()
-
-        from notification.models import Notification
-        Notification.objects.create(
-            writer  = withdrawal.writer,
-            type    = 'payout',
-            message = f'Your withdrawal of KES {withdrawal.amount_kes} has been processed via M-Pesa.'
-        )
-        return Response({'message': 'Withdrawal marked as processed.'})
+        return Response({'message': 'Payout marked as processed.'})
