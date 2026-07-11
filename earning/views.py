@@ -6,7 +6,7 @@ from django.utils import timezone
 from .models import Earning, Payout
 from notification.models import Notification
 
-MINIMUM_WITHDRAWAL_KES = 2500
+MINIMUM_WITHDRAWAL_KES = 7500
 
 
 class EarningsSummaryView(APIView):
