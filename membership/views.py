@@ -4,6 +4,11 @@ from rest_framework.views import APIView
 from .models import CreditPackage, CreditTransaction, WriterCredits
 
 
+class IsAdminUser(permissions.BasePermission):
+    def has_permission(self, request, view):
+        return request.user.is_authenticated and request.user.role == 'admin'
+
+
 class CreditPackageListView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -56,7 +61,6 @@ class InitiateCreditPurchaseView(APIView):
             return Response({'error': 'Invalid package.'}, status=400)
 
         # TODO: Trigger M-Pesa STK Push here
-        # For now simulate success
         balance, _ = WriterCredits.objects.get_or_create(writer=request.user)
         balance.add_credits(package.credits)
 
@@ -73,9 +77,8 @@ class InitiateCreditPurchaseView(APIView):
         })
 
 
-class AdminCreditPackageView(generics.ListCreateAPIView):
-    permission_classes = [permissions.IsAdminUser]
-    queryset = CreditPackage.objects.all()
+class AdminCreditPackageView(APIView):
+    permission_classes = [IsAdminUser]
 
     def get(self, request):
         packages = CreditPackage.objects.all()

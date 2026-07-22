@@ -61,11 +61,17 @@ class WriterProfileSerializer(serializers.ModelSerializer):
 
 
 class AdminWriterListSerializer(serializers.ModelSerializer):
-    is_membership_active = serializers.ReadOnlyField()
+    credit_balance = serializers.SerializerMethodField()
 
     class Meta:
         model  = Writer
         fields = [
             'id', 'full_name', 'email', 'phone', 'rating',
-            'is_membership_active', 'is_active', 'created_at'
+            'credit_balance', 'is_active', 'created_at'
         ]
+
+    def get_credit_balance(self, obj):
+        try:
+            return obj.credit_balance.balance
+        except Exception:
+            return 0
